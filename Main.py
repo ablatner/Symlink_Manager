@@ -1,12 +1,20 @@
 import wx
-import os
+import shutil
 import wx.lib.agw.multidirdialog as MDD
+import ctypes
+import csv
+
+kerneldll = ctypes.windll.LoadLibrary("kernel32.dll")
 
 FRAME_TITLE = "Symlink Manager"
 FRAME_SIZE = (700, 500)
 FRAME_POS = (200,200)
 
-class MainWindow(wx.Frame):
+# data files
+PREV_HISTORY_FILE = "prev_history.csv"
+CURR_HISTORY_FILE = "curr_history.csv"
+
+class MainWindow(wx.Frame):    
     def __init__(self):
         wx.Frame.__init__(self, None, wx.ID_ANY, FRAME_TITLE, size=FRAME_SIZE,
                           style = wx.DEFAULT_FRAME_STYLE, pos = FRAME_POS)
@@ -57,7 +65,7 @@ class MainWindow(wx.Frame):
 
         help_menu = wx.Menu()
         for id, label, help_text, handler in \
-            [(wx.ID_ABOUT, "About", "Information about this program",
+            [(wx.ID_ABOUT, "&About", "Information about this program",
               self.on_about)]:
             if id == None:
                 help_menu.AppendSeperator()
@@ -65,10 +73,10 @@ class MainWindow(wx.Frame):
                 item = help_menu.Append(id, label, help_text)
                 self.Bind(wx.EVT_MENU, handler, item)
 
-        menus_tup = ((file_menu, "&File"), (edit_menu, "Edit"),
-                     (help_menu, "Help"))
+        menus = ((file_menu, "&File"), (edit_menu, "&Edit"),
+                     (help_menu, "&Help"))
         menu_bar = wx.MenuBar()
-        for (menu, label) in menus_tup:
+        for (menu, label) in menus:
             menu_bar.Append(menu, label)
         self.SetMenuBar(menu_bar)
 
@@ -76,7 +84,7 @@ class MainWindow(wx.Frame):
         self.Close()
 
     def on_about(self, event):
-        dialog = wx.MessageDialog(self, "Create and manage symlinks.", "About "\
+        dialog = wx.MessageDialog(self, "Create and manage symlinks.", "About "
                                   "Symlink Manager", wx.OK|wx.CENTRE)
         dialog.ShowModal()
         dialog.Destroy()
@@ -86,15 +94,17 @@ class MainWindow(wx.Frame):
         self.prev_heading = "Previous Links"
         self.curr_heading = "Current Links"
         # Folder lists
+        init_prev_data = OpenDataCSV(PREV_HISTORY_FILE)
         self.prev_listCtrl = FolderListCtrl(self.panel, ["Folder Path",\
-                                                   "Last Linked Path"])
+                             "Last Linked Path"], init_prev_data)
+        init_curr_data = OpenDataCSV(CURR_HISTORY_FILE)
         self.curr_listCtrl = FolderListCtrl(self.panel, ["Folder Path",\
-                                                   "Currently Linked Path"])
+                             "Currently Linked Path"], init_curr_data)
         # Buttons
         new_button = wx.Button(self.panel, id=-1, label = "New")
         self.panel.Bind(wx.EVT_BUTTON, self.on_new, new_button)
         match_button = wx.Button(self.panel, id=-1, label = "Match")
-        #match_button.Bind(wx.EVT_BUTTON, self.OnMatch)
+        #match_button.Bind(wx.EVT_BUTTON, self.OnMatch, match_button)
         prev_button = wx.Button(self.panel, id=-1, label = "Prev")
         #self.panel.Bind(wx.EVT_BUTTON, self.OnPrev, prev_button)
         self.prev_buttons = (new_button, match_button, prev_button)
@@ -106,7 +116,8 @@ class MainWindow(wx.Frame):
         self.curr_buttons = (unlink_button, relink_button)
 
     def on_new(self, event):
-        choose_dir_dialog = MDD.MultiDirDialog(self)
+        choose_dir_dialog = MDD.MultiDirDialog(self, title="Select folders to "
+                                               "move")
         # Clicked ok on multi folder select
         if choose_dir_dialog.ShowModal() == wx.ID_OK:
             folders_list = choose_dir_dialog.GetPaths()
@@ -149,15 +160,17 @@ class MainWindow(wx.Frame):
         return choice
 
     def new_folders(self, new_folders):
-        new_dir_dialog = wx.DirDialog(self)
+        new_dir_dialog = wx.DirDialog(self, message = "Choose new location")
+        new_links = []
         if new_dir_dialog.ShowModal() == wx.ID_OK:
-            index, new_path = 0, new_dir_dialog.GetPath()
+            index, new_loc = 0, new_dir_dialog.GetPath()
             for folder in new_folders:
                 self.prev_listCtrl.InsertStringItem(index, folder)
-                self.prev_listCtrl.SetStringItem(index, 1, new_path)
-                self.symlink(folder, new_path)
+                self.prev_listCtrl.SetStringItem(index, 1, new_loc)
+                new_links.append(self.symlink(folder, new_loc))
                 index += 1
         new_dir_dialog.Destroy()
+        self.SaveDataCSV(PREV_HISTORY_FILE, new_links)
 
     def OnMatch(self, event):
         dialog = wx.MessageDialog(self, "Moves to same location on another "\
@@ -165,9 +178,40 @@ class MainWindow(wx.Frame):
         dialog.ShowModal()
         dialog.Destroy()
 
-    # Makes symlink use mklink, removes existing with rmdir
-    def symlink(old_path, new_path):
+def symlink(self, old_path, new_loc):
+    old_loc, folder_name = old_path.rsplit('\\', 1)
+    new_path = new_loc + '\\' + folder_name
+    print "Moving..."
+    shutil.move(old_path, new_path)
+    print "Moved."
+    print "Symlinking..."
+    kerneldll.CreateSymbolicLinkW(old_path, new_path, 1)
+    print "Symlinked."
+    return [folder_name, old_loc, new_loc]
+
+def YesNoDialog(parent, question, caption = 'Yes or no?'):
+    dlg = wx.MessageDialog(parent, question, caption, 
+                           wx.YES|wx.NO|wx.ICON_QUESTION)
+    answer = dlg.ShowModal()
+    dlg.Destroy()
+    return answer
+
+def SaveDataCSV(file_name, data):
+    with open(file_name, "ab") as file:
+        writer = csv.writer(file)
+        writer.writerows(data)
+
+def OpenDataCSV(file_name):
+    data = []
+    try:
+        with open(file_name, "rb") as file:
+            reader = csv.reader(file, delimiter = ',')
+            for row in reader:
+                data.append(row)
+    except IOError:
         pass
+    return data
+
 
 class ColPanel(wx.Panel):
     def __init__(self, parent, heading_txt, folder_listCtrl, button_tup):
@@ -191,11 +235,13 @@ class ColPanel(wx.Panel):
         self.Layout()
 
 class FolderListCtrl(wx.ListCtrl):
-    def __init__(self, parent, col_titles):
+    def __init__(self, parent, col_titles, init_data):
         wx.ListCtrl.__init__(self, parent, size=(300,200))
         self.SetSingleStyle(wx.LC_REPORT|wx.BORDER_SUNKEN)
         for title in col_titles:
             self.InsertColumn(col_titles.index(title), title)
+        for row in init_data:
+            self.Append(row)
 
 if __name__ == '__main__':
     app = wx.App()
