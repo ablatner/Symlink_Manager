@@ -24,5 +24,5 @@ if '%errorlevel%' NEQ '0' (
     pushd "%CD%"
     CD /D "%~dp0"
 :--------------------------------------
-
-C:\python27\python.exe "D:\MANUAL BACKUP\D\Users\Andrew\Documents\GitHub\Symlink_Manager\main.py"
+C:\python27\python.exe ".\Main.py"
+pause
