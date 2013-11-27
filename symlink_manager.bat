@@ -25,4 +25,3 @@ if '%errorlevel%' NEQ '0' (
     CD /D "%~dp0"
 :--------------------------------------
 C:\python27\python.exe ".\Main.py"
-pause

@@ -3,8 +3,9 @@ import shutil
 import wx.lib.agw.multidirdialog as MDD
 import ctypes
 import csv
+import sqlite3
 
-kerneldll = ctypes.windll.LoadLibrary("kernel32.dll")
+KERNELDLL = ctypes.windll.LoadLibrary("kernel32.dll")
 
 FRAME_TITLE = "Symlink Manager"
 FRAME_SIZE = (700, 500)
@@ -13,10 +14,28 @@ FRAME_POS = (200,200)
 # Heading strings
 PREV_HEADING = "Previous Links"
 CURR_HEADING = "Current Links"
+# folder name = original_loc+name
+PREV_COLUMN_TITLES = ["Number", "Folder", "Last Link Path"]
+CURR_COLUMN_TITLES = ["Folder", "Current Link Path"]
+
+# sqlite tables
+PREV_TABLE = "previous"
+PREV_COLUMNS = "(id integer primary key, name text, " \
+                    "original_loc text, last_link text)"
+PREV_TABLE_DECLARATION = "%s %s" % (PREV_TABLE, PREV_COLUMNS)
+CURR_TABLE = "current"
+CURR_COLUMNS = "(name text, original_loc text, current_link text)"
+CURR_TABLE_DECLARATION = "%s %s" % (CURR_TABLE, CURR_COLUMNS)
 
 # data files
 PREV_HISTORY_FILE = "prev_history.csv"
 CURR_HISTORY_FILE = "curr_history.csv"
+
+LISTS = {"PREV": {"HEADING": PREV_HEADING, "COLUMN_TITLES": PREV_COLUMN_TITLES,\
+           "TABLE": PREV_TABLE, "TABLE_DECLARATION": PREV_TABLE_DECLARATION}, \
+         "CURR": {"HEADING": CURR_HEADING, "COLUMN_TITLES": CURR_COLUMN_TITLES,\
+           "TABLE": CURR_TABLE, "TABLE_DECLARATION": CURR_TABLE_DECLARATION}}
+
 
 class MainWindow(wx.Frame):
     def __init__(self):
@@ -25,10 +44,8 @@ class MainWindow(wx.Frame):
         self.panel = wx.Panel(self) # wx.window that contains ctrls
         self.create_menu()
         self.CreateStatusBar()
-        self.read_data()
+        self.init_database()
         self.create_controls()
-        self.create_columns()
-        self.SetSizer(self.col_sizer)
         self.Fit()
 
     def create_menu(self):
@@ -43,7 +60,7 @@ class MainWindow(wx.Frame):
 
                  ("&Help", \
                     ((wx.ID_ABOUT, "&About", "Information about this program", \
-                   self.on_about), \
+                      self.on_about), \
                     ) \
                  ) \
                 )
@@ -60,8 +77,45 @@ class MainWindow(wx.Frame):
             menu_bar.Append(menu, label)
         self.SetMenuBar(menu_bar)
 
+    def init_database(self):
+        MakeBackupFile('database.db', 'Database created.')
+        self.connection = sqlite3.connect('database.db')
+        self.cursor = self.connection.cursor()
+        for val in LISTS.values():
+            self.cursor.execute("create table if not exists %s" % \
+                                 (val['TABLE_DECLARATION']))
+        self.connection.commit()
+
+    def create_controls(self):
+        # Buttons
+        new_button = wx.Button(self.panel, id=-1, label = "New")
+        self.panel.Bind(wx.EVT_BUTTON, self.on_new, new_button)
+        match_button = wx.Button(self.panel, id=-1, label = "Match")
+        #match_button.Bind(wx.EVT_BUTTON, self.OnMatch, match_button)
+        prev_button = wx.Button(self.panel, id=-1, label = "Prev")
+        #self.panel.Bind(wx.EVT_BUTTON, self.OnPrev, prev_button)
+        LISTS['PREV']['BUTTONS'] = (new_button, match_button, prev_button)
+
+        unlink_button = wx.Button(self.panel, id=-1, label = "Unlink")
+        self.panel.Bind(wx.EVT_BUTTON, self.on_unlink, unlink_button)
+        LISTS['CURR']['BUTTONS'] = (unlink_button,)
+
+        col_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        for val in LISTS.values():
+            self.cursor.execute("select * from %s" % val['TABLE'])
+            list_ctrl = FolderListCtrl(self.panel, val['COLUMN_TITLES'], \
+                                           self.cursor.fetchall())
+            val['PANEL'] = ColPanel(self.panel, val['HEADING'], \
+                              list_ctrl, val['BUTTONS'])
+            col_sizer.Add((20,0))
+            col_sizer.Add(val['PANEL'], proportion=1, flag=wx.EXPAND)
+        col_sizer.Add((20,0))
+        self.SetSizer(col_sizer)
+
     def on_exit(self, event):
-        OverwriteDataCSV(CURR_HISTORY_FILE, self.curr_data)
+        self.connection.commit()
+        self.connection.close()
+        # OverwriteDataCSV(CURR_HISTORY_FILE, self.curr_data)
         self.Close()
 
     def on_about(self, event):
@@ -70,81 +124,46 @@ class MainWindow(wx.Frame):
         dialog.ShowModal()
         dialog.Destroy()
 
-    def create_controls(self):
-        # Folder lists
-        self.prev_listCtrl = FolderListCtrl(self.panel, ["Folder",\
-                             "Last Linked Path"], self.prev_data)
-        self.curr_listCtrl = FolderListCtrl(self.panel, ["Folder",\
-                             "Currently Linked Path"], self.curr_data)
-        # Buttons
-        new_button = wx.Button(self.panel, id=-1, label = "New")
-        self.panel.Bind(wx.EVT_BUTTON, self.on_new, new_button)
-        match_button = wx.Button(self.panel, id=-1, label = "Match")
-        #match_button.Bind(wx.EVT_BUTTON, self.OnMatch, match_button)
-        prev_button = wx.Button(self.panel, id=-1, label = "Prev")
-        #self.panel.Bind(wx.EVT_BUTTON, self.OnPrev, prev_button)
-        self.prev_buttons = (new_button, match_button, prev_button)
-
-        unlink_button = wx.Button(self.panel, id=-1, label = "Unlink")
-        self.panel.Bind(wx.EVT_BUTTON, self.on_unlink, unlink_button)
-        self.curr_buttons = (unlink_button,)
-
-    def create_columns(self):
-        prev_panel = ColPanel(self.panel, PREV_HEADING,
-                              self.prev_listCtrl, self.prev_buttons)
-        curr_panel = ColPanel(self.panel, CURR_HEADING,
-                              self.curr_listCtrl, self.curr_buttons)
-
-        self.col_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.col_sizer.Add((20,0))
-        self.col_sizer.Add(prev_panel, proportion=1, flag=wx.EXPAND)
-        self.col_sizer.Add((20,0))
-        self.col_sizer.Add(curr_panel, proportion=1, flag=wx.EXPAND)
-        self.col_sizer.Add((20,0))
-
     def new_link(self, new_loc=None):
         prev_selection = get_selection(self.prev_listCtrl)
         curr_selection = get_selection(self.curr_listCtrl)
         if prev_selection == -1 and curr_selection == -1:
             # no folder selected
-            
+            choose_dir_dialog = MDD.MultiDirDialog(self, \
+                                title="Select folders to move")
+            # Clicked ok after selecting folders
+            if choose_dir_dialog.ShowModal() == wx.ID_OK:
+                pass
 
-    def get_selection(self, list_ctrls):
-        if list_ctrl.GetSelectedItemCount() > 0:
-            selection = [list_ctrl.GetFirstSelected()]
-            while len(selection) < list_ctrl.GetSelectedItemCount():
-                next_item = list_ctrl.GetNextSelected(selection[-1])
-                selection.append(next_item)
-            return selection
-        return -1
+    def on_new(self, event):
+        self.new_link()
 
-
-    def on_new(self. event):
-        choose_dir_dialog = MDD.MultiDirDialog(self, title="Select folders to "
-                                               "move")
-        # Clicked ok on multi folder select
-        if choose_dir_dialog.ShowModal() == wx.ID_OK:
-            folders_list = choose_dir_dialog.GetPaths()
-            # No folders selected
-            if len(folders_list) == 0:
-                self.no_folders(choose_dir_dialog)
-            # Folders selected
-            else:
-                invalid_list, new_folders = [], []
-                # Sort valid and invalid folders
-                for folder in folders_list:
-                    if folder[-1] in (":", "\\"):
-                        invalid_list.append((folder, "Cannot add drive"))
-                    else:
-                        new_folders.append(folder)
-                # If invalid folders, show error with list and give option to
-                # cancel new link operation
-                continue_op = wx.ID_OK
-                if len(invalid_list) != 0:
-                    continue_op = self.invalid_folders(choose_dir_dialog,
-                                                       invalid_list)
-                if len(new_folders) != 0 and continue_op == wx.ID_OK:
-                    self.make_link(new_folders)
+    # def on_new(self. event):
+    #     choose_dir_dialog = MDD.MultiDirDialog(self, \
+    #                         title="Select folders to move")
+    #     # Clicked ok on multi folder select
+    #     if choose_dir_dialog.ShowModal() == wx.ID_OK:
+    #         folders_list = choose_dir_dialog.GetPaths()
+    #         # No folders selected
+    #         if len(folders_list) == 0:
+    #             self.no_folders(choose_dir_dialog)
+    #         # Folders selected
+    #         else:
+    #             invalid_list, new_folders = [], []
+    #             # Sort valid and invalid folders
+    #             for folder in folders_list:
+    #                 if folder[-1] in (":", "\\"):
+    #                     invalid_list.append((folder, "Cannot add drive"))
+    #                 else:
+    #                     new_folders.append(folder)
+    #             # If invalid folders, show error with list and give option to
+    #             # cancel new link operation
+    #             continue_op = wx.ID_OK
+    #             if len(invalid_list) != 0:
+    #                 continue_op = self.invalid_folders(choose_dir_dialog,
+    #                                                    invalid_list)
+    #             if len(new_folders) != 0 and continue_op == wx.ID_OK:
+    #                 self.make_link(new_folders)
                     
     def on_unlink(self, event):
         pass
@@ -186,12 +205,6 @@ class MainWindow(wx.Frame):
         none_dialog.ShowModal()
         none_dialog.Destroy()
 
-    def read_data(self):
-        MakeBackupFile(PREV_HISTORY_FILE)
-        self.prev_data = OpenDataCSV(PREV_HISTORY_FILE)
-        MakeBackupFile(CURR_HISTORY_FILE)
-        self.curr_data = OpenDataCSV(CURR_HISTORY_FILE)
-        
 def symlink(old_path, new_loc):
     old_loc, folder_name = old_path.rsplit('\\', 1)
     new_path = new_loc + '\\' + folder_name
@@ -199,7 +212,7 @@ def symlink(old_path, new_loc):
     shutil.move(old_path, new_path)
     print("Moved.")
     print("Symlinking...")
-    kerneldll.CreateSymbolicLinkW(old_path, new_path, 1)
+    KERNELDLL.CreateSymbolicLinkW(old_path, new_path, 1)
     print("Symlinked.")
     return [folder_name, old_loc, new_loc]
 
@@ -226,11 +239,23 @@ def OpenDataCSV(file_name):
         pass
     return data
 
-def MakeBackupFile(file_name):
+def MakeBackupFile(file_name, error_message):
     try:
-        shutil.copy(file_name, file_name + '~')
+        shutil.copy(file_name, '~' + file_name)
     except:
-        print("Cannot make backup file")
+        print(error_message)
+
+def get_selection(list_ctrl, coL_reader=None):
+    # col reader is function that selects desired columns and handles strings
+    if list_ctrl.GetSelectedItemCount() > 0:
+        selection = [list_ctrl.GetFirstSelected()]
+        while len(selection) < list_ctrl.GetSelectedItemCount():
+            # gets list of indicies of selected items
+            # NOT the items themselves
+            next_item = list_ctrl.GetNextSelected(selection[-1])
+            selection.append(next_item)
+        return selection
+    return -1
 
 class ColPanel(wx.Panel):
     def __init__(self, parent, heading_txt, folder_listCtrl, button_tup):
