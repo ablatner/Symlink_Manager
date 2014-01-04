@@ -120,9 +120,9 @@ class MainWindow(wx.Frame):
         col_sizer = wx.BoxSizer(wx.HORIZONTAL)
         for val in LISTS.values():
             self.cursor.execute("select * from %s" % val['TABLE'])
-            val["OBJECTLISTVIEW"] = make_olv(self.panel, val['COLUMNS'], [
-                Folder(row[1]+row[0], row[2], val['STATE'], row[3]) for row 
-                in self.cursor.fetchall()])
+            val["OBJECTLISTVIEW"] = make_olv(self.panel, val['COLUMNS'],
+                [Folder(row[1]+row[0], row[2], val['STATE'], row[3]) for row 
+                 in self.cursor.fetchall()])
             val['PANEL'] = make_column_panel(self.panel, val['HEADING'],
                                 val["OBJECTLISTVIEW"], val['BUTTONS'])
             col_sizer.Add((20,0))
@@ -142,8 +142,30 @@ class MainWindow(wx.Frame):
         dialog.ShowModal()
         dialog.Destroy()
 
+    def link(self, folder, new_loc):
+        old_state = folder.link_state
+        if symlink(folder, new_loc) != 0:
+            print("Link for %s failed." % folder.original_path)
+            return
+        if old_state == LISTS['CURR']['STATE']:
+            print folder.link_path
+            LISTS['CURR']['OBJECTLISTVIEW'].RefreshObject(folder)
+            self.cursor.execute("update current set current_link='%s' "
+                "where folder='%s' and original_loc='%s'" %
+                (folder.link_loc, folder.name, folder.original_path))
+        else:
+            if old_state == LISTS['PREV']['STATE']:
+                LISTS['PREV']['OBJECTLISTVIEW'].RemoveObject(folder)
+                self.cursor.execute("delete from previous where "
+                    "original_loc='%s'" % (folder.original_loc))
+            LISTS['CURR']['OBJECTLISTVIEW'].AddObject(folder)
+            self.cursor.execute("insert into current values "
+                "('%s','%s','%s','%s')" % (folder.name,
+                folder.original_loc, folder.link_loc, folder.date))
+        self.connection.commit()
+
     def on_new(self, event):
-        selection = self.get_selection() # list of folder objects
+        selection = self.get_selection("move") # list of folder objects
         if not selection: # nothing selected; nothing to do
             return
         new_dir_dialog = wx.DirDialog(self, message = "Choose new location")
@@ -151,32 +173,25 @@ class MainWindow(wx.Frame):
             # new location chosen
             new_loc = make_proper_loc(new_dir_dialog.GetPath())
             for folder in selection:
-                old_state = folder.link_state
-                symlink(folder, new_loc)
-                if old_state == LISTS['CURR']['STATE']:
-                    LISTS['CURR']['OBJECTLISTVIEW'].RefreshObject(folder)
-                    self.cursor.execute("update current set current_link='%s' "
-                        "where original_loc='%s'" %
-                        (folder.link_loc, folder.original_loc))
-                else:
-                    if old_state == LISTS['PREV']['STATE']:
-                        LISTS['PREV']['OBJECTLISTVIEW'].RemoveObject(folder)
-                        self.cursor.execute("delete from previous where "
-                            "original_loc='%s'" % (folder.original_loc))
-                    LISTS['CURR']['OBJECTLISTVIEW'].AddObject(folder)
-                    self.cursor.execute("insert into current values "
-                        "('%s','%s','%s','%s')" % (folder.name,
-                        folder.original_loc, folder.link_loc, folder.date))
-                self.connection.commit()
+                self.link(folder, new_loc)
         new_dir_dialog.Destroy()
 
     def on_match(self, event):
-        self.new_link()
+        selection = self.get_selection("match") # list of folder objects
+        if not selection: # nothing selected; nothing to do
+            return
+        new_dir_dialog = wx.DirDialog(self, message = "Choose new root location")
+        if new_dir_dialog.ShowModal() == wx.ID_OK:
+            # new location chosen
+            new_loc = make_proper_loc(new_dir_dialog.GetPath())
+            for folder in selection:
+                print "matched ", new_loc+folder.original_loc.split('\\', 1)[1]
+                self.link(folder, new_loc + folder.original_loc.split('\\', 1)[1])
                     
     def on_unlink(self, event):
         pass
 
-    def get_selection(self):
+    def get_selection(self, cmd):
         """
         Return selected folders or ask user to select with DirDialog
 
@@ -187,7 +202,7 @@ class MainWindow(wx.Frame):
         if prev_selection or curr_selection:
             return prev_selection + curr_selection
         # no folder selected
-        choose_dir_dialog = MDD.MultiDirDialog(self, title="Select folders to move")
+        choose_dir_dialog = MDD.MultiDirDialog(self, title="Select folders to %s" % cmd)
         # Clicked ok after selecting folders
         returned_folders = None
         if choose_dir_dialog.ShowModal() == wx.ID_OK:
@@ -225,16 +240,36 @@ class MainWindow(wx.Frame):
 def symlink(folder, new_loc):
     new_path = new_loc + folder.name
     print("Moving...")
-    move(folder.link_path, new_path) # moves actual files
-    print("Moved.")
+    try:
+        move(folder.link_path, new_path) # moves actual files
+        print("Moved.")
+    except:
+        print("Move failed of file %s" % folder.original_path)
+        return -1
     if folder.link_path != folder.original_path:
         print("Removing old symlink...")
-        rmdir(folder.original_path) # removes old symlink
-        print("Old symlink removed.")
+        try:
+            rmdir(folder.original_path) # removes old symlink
+            print("Old symlink removed.")
+        except:
+            print("Could not remove old symlink at: %s" % folder.original_path)
+            move(new_path, folder.link_path)
+            return -1
     print("Symlinking...")
-    KERNELDLL.CreateSymbolicLinkW(folder.original_path, new_path, 1)
-    print("Symlinked.")
+    try:
+        KERNELDLL.CreateSymbolicLinkW(folder.original_path, new_path, 1)
+        print("Symlinked.")
+    except:
+        print("Could not symlink from %s to %s" % (folder.original_path, new_path))
+        move(new_path, folder.link_path)
+        if folder.link_path != folder.original_path:
+            try:
+                KERNELDLL.CreateSymbolicLinkW(folder.original_path, folder.link_path, 1)
+            except:
+                print("Could not recreate old symlink from %s to %s" % (folder.original_path, folder.link_path))
+        return -1
     folder.set_link_loc(new_loc)
+    return 0
 
 def message_dialog_answer(parent, message, title, styles):
     dlg = wx.MessageDialog(parent, message, title, styles)
@@ -282,6 +317,9 @@ def make_proper_loc(improper_loc):
 
 class Folder():
     def __init__(self, original_path, link_loc=None, link_state=NEW_STATE, date=None):
+        print original_path
+        print link_loc
+        print link_state
         self.original_path = original_path
         self.original_loc, self.name = original_path.rsplit('\\', 1)
         self.original_loc = make_proper_loc(self.original_loc)
@@ -290,10 +328,11 @@ class Folder():
             self.link_loc = self.original_loc
         else:
             self.link_loc = link_loc
-        if date is not None:
+        if date is None:
             self.date = self.set_date()
         else:
             self.date = date
+        print self.date
 
     @property
     def link_path(self):
