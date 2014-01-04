@@ -1,14 +1,13 @@
 import wx
 from ObjectListView import ObjectListView, ColumnDefn
 from datetime import datetime
-import shutil
-import os
+from shutil import move, copy
+from os import rmdir
 import wx.lib.agw.multidirdialog as MDD
-import ctypes
-import csv
+from ctypes import windll
 import sqlite3
 
-KERNELDLL = ctypes.windll.LoadLibrary("kernel32.dll")
+KERNELDLL = windll.LoadLibrary("kernel32.dll")
 
 FRAME_TITLE = "Symlink Manager"
 FRAME_SIZE = (1200, 300)
@@ -18,20 +17,20 @@ FRAME_POS = (200,200)
 PREV_HEADING = "Previous Links"
 CURR_HEADING = "Current Links"
 
-make_columns = lambda link_name: [
-        ColumnDefn("Date", valueGetter="date"),
+make_columns = lambda link_path: [
+        ColumnDefn("Date", valueGetter="date", minimumWidth=75),
         ColumnDefn("Original Path", valueGetter="original_path", isSpaceFilling=True),
-        ColumnDefn(link_name, valueGetter="link_path", isSpaceFilling=True)
+        ColumnDefn(link_path, valueGetter="link_path", isSpaceFilling=True)
     ]
 PREV_COLUMNS = make_columns("Last Link Path")
 CURR_COLUMNS = make_columns("Current Link Path")
 
 # sqlite tables
 PREV_TABLE = "previous"
-PREV_SQL_COLUMNS = "(date text, folder text, original_loc text, last_link text)"
+PREV_SQL_COLUMNS = "(folder text, original_loc text, last_link text, date text)"
 PREV_TABLE_DECLARATION = "%s %s" % (PREV_TABLE, PREV_SQL_COLUMNS)
 CURR_TABLE = "current"
-CURR_SQL_COLUMNS = "(date text, folder text, original_loc text, current_link text)"
+CURR_SQL_COLUMNS = "(folder text, original_loc text, current_link text, date text)"
 CURR_TABLE_DECLARATION = "%s %s" % (CURR_TABLE, CURR_SQL_COLUMNS)
 
 # data files
@@ -44,6 +43,18 @@ LISTS = {
     "CURR": {"HEADING": CURR_HEADING, "COLUMNS": CURR_COLUMNS, "STATE": 1,
         "TABLE": CURR_TABLE, "TABLE_DECLARATION": CURR_TABLE_DECLARATION}
 }
+NEW_STATE = -1
+"""
+'HEADING': Headings shown in actual GUI
+'COLUMNS': Actual ColumnDefn's used by the ObjectListViews to make the lists
+'STATE': Keeps track of whether folder is newly added, prev/curr linked;
+         abstracts actual state values
+'TABLE': SQL table names
+'TABLE_DECLARATION': String used in SQL to make table
+'OBJECTLISTVIEW': Stores data used in GUI list
+'BUTTONS': Stores list of wx buttons used for looping
+'PANEL': Stores the wx panel object used for each column
+"""
 
 class MainWindow(wx.Frame):
     def __init__(self):
@@ -75,7 +86,7 @@ class MainWindow(wx.Frame):
         for (label, menu_list) in menus:
             menu = wx.Menu()
             for (id, label, help_text, handler) in menu_list:
-                if id == None:
+                if id is None:
                     menu.AppendSeperator()
                 else:
                     item = menu.Append(id, label, help_text)
@@ -109,11 +120,11 @@ class MainWindow(wx.Frame):
         col_sizer = wx.BoxSizer(wx.HORIZONTAL)
         for val in LISTS.values():
             self.cursor.execute("select * from %s" % val['TABLE'])
-            val["ObjectListView"] = make_olv(self.panel, val['COLUMNS'], [
-                Folder(row[2]+'\\'+row[1], row[3], val['STATE'], row[0]) for row 
+            val["OBJECTLISTVIEW"] = make_olv(self.panel, val['COLUMNS'], [
+                Folder(row[1]+row[0], row[2], val['STATE'], row[3]) for row 
                 in self.cursor.fetchall()])
-            val['PANEL'] = ColPanel(self.panel, val['HEADING'],
-                                val["ObjectListView"], val['BUTTONS'])
+            val['PANEL'] = make_column_panel(self.panel, val['HEADING'],
+                                val["OBJECTLISTVIEW"], val['BUTTONS'])
             col_sizer.Add((20,0))
             col_sizer.Add(val['PANEL'], proportion=1, flag=wx.EXPAND)
         col_sizer.Add((20,0))
@@ -131,62 +142,32 @@ class MainWindow(wx.Frame):
         dialog.ShowModal()
         dialog.Destroy()
 
-    def new_links(self, folders, new_loc):
-        pass
-     # def on_new(self. event):
-        #     choose_dir_dialog = MDD.MultiDirDialog(self, \
-        #                         title="Select folders to move")
-        #     # Clicked ok on multi folder select
-        #     if choose_dir_dialog.ShowModal() == wx.ID_OK:
-                # folders_list = choose_dir_dialog.GetPaths()
-                # # No folders selected
-                # if len(folders_list) == 0:
-                #     self.no_folders(choose_dir_dialog)
-                # # Folders selected
-                # else:
-                #     invalid_list, new_folders = [], []
-                #     # Sort valid and invalid folders
-                #     for folder in folders_list:
-                #         if folder[-1] in (":", "\\"):
-                #             invalid_list.append((folder, "Cannot add drive"))
-                #         else:
-                #             new_folders.append(folder)
-                #     # If invalid folders, show error with list and give option to
-                #     # cancel new link operation
-                #     continue_op = wx.ID_OK
-                #     if len(invalid_list) != 0:
-                #         continue_op = self.invalid_folders(choose_dir_dialog,
-                #                                            invalid_list)
-                #     if len(new_folders) != 0 and continue_op == wx.ID_OK:
-                #         self.make_link(new_folders)
-
     def on_new(self, event):
-        selection = self.get_selection()
+        selection = self.get_selection() # list of folder objects
+        if not selection: # nothing selected; nothing to do
+            return
         new_dir_dialog = wx.DirDialog(self, message = "Choose new location")
         if new_dir_dialog.ShowModal() == wx.ID_OK:
-            new_loc = new_dir_dialog.GetPath()
+            # new location chosen
+            new_loc = make_proper_loc(new_dir_dialog.GetPath())
             for folder in selection:
-                if folder.link_state == -1:
-                    folder.link_loc = new_loc
-                    folder.link_state = 1
-                    # LISTS['CURR']['ObjectListView'].AddObject(folder)
-                    for current in LISTS["CURR"]["ObjectListView"].GetObjects():
-                        if current.link_path == folder.original_path:
-                            # dialog about folder being result of symlink
-                            # ask for confirmation and use move_symlink()
-                            pass
-                elif folder.link_state == 0:
-                    LISTS['CURR']['ObjectListView'].AddObject(
-                        Folder(folder.original_path, new_loc, 1))
-                elif folder.link_state == 1:
-                    folder
-                self.cursor.execute("insert into current values "
-                    "('%s','%s','%s','%s')" % 
-                    (folder.date, folder.name, folder.original_loc,
-                    folder.link_loc))
-                symlink(folder.original_path, folder.link_path)
-            self.connection.commit()
-
+                old_state = folder.link_state
+                symlink(folder, new_loc)
+                if old_state == LISTS['CURR']['STATE']:
+                    LISTS['CURR']['OBJECTLISTVIEW'].RefreshObject(folder)
+                    self.cursor.execute("update current set current_link='%s' "
+                        "where original_loc='%s'" %
+                        (folder.link_loc, folder.original_loc))
+                else:
+                    if old_state == LISTS['PREV']['STATE']:
+                        LISTS['PREV']['OBJECTLISTVIEW'].RemoveObject(folder)
+                        self.cursor.execute("delete from previous where "
+                            "original_loc='%s'" % (folder.original_loc))
+                    LISTS['CURR']['OBJECTLISTVIEW'].AddObject(folder)
+                    self.cursor.execute("insert into current values "
+                        "('%s','%s','%s','%s')" % (folder.name,
+                        folder.original_loc, folder.link_loc, folder.date))
+                self.connection.commit()
         new_dir_dialog.Destroy()
 
     def on_match(self, event):
@@ -196,103 +177,96 @@ class MainWindow(wx.Frame):
         pass
 
     def get_selection(self):
-        prev_selection = LISTS["PREV"]["ObjectListView"].GetSelectedObjects()
-        curr_selection = LISTS["CURR"]["ObjectListView"].GetSelectedObjects()
-        if not (prev_selection or curr_selection):
-            # no folder selected
-            choose_dir_dialog = MDD.MultiDirDialog(self, \
-                                title="Select folders to move")
-            # Clicked ok after selecting folders
-            if choose_dir_dialog.ShowModal() == wx.ID_OK:
-                chosen_new_folders = choose_dir_dialog.GetPaths()
-                # No folders selected
-                if len(chosen_new_folders) == 0:
-                    self.no_folders(choose_dir_dialog)
-                # Folders selected
+        """
+        Return selected folders or ask user to select with DirDialog
+
+        Return value: List of Folder objects, or None
+        """
+        prev_selection = LISTS["PREV"]["OBJECTLISTVIEW"].GetSelectedObjects()
+        curr_selection = LISTS["CURR"]["OBJECTLISTVIEW"].GetSelectedObjects()
+        if prev_selection or curr_selection:
+            return prev_selection + curr_selection
+        # no folder selected
+        choose_dir_dialog = MDD.MultiDirDialog(self, title="Select folders to move")
+        # Clicked ok after selecting folders
+        returned_folders = None
+        if choose_dir_dialog.ShowModal() == wx.ID_OK:
+            chosen_new_folders = choose_dir_dialog.GetPaths()
+            print "chosen: ", chosen_new_folders
+            # No folders selected
+            if len(chosen_new_folders) == 0:
+                message_dialog_answer(self, "No folders selected.",
+                                    "No selection", wx.OK|wx.CENTRE)
+            # Folders selected
+            invalid_folders, new_folders = [], []
+            # Sort valid and invalid folders
+            for folder in chosen_new_folders:
+                if folder[-1] in (":", "\\"):
+                    invalid_folders.append((folder, "Cannot add drive"))
                 else:
-                    invalid_folders, new_folders = [], []
-                    # Sort valid and invalid folders
-                    for folder in chosen_new_folders:
-                        if folder[-1] in (":", "\\"):
-                            invalid_folders.append((folder, "Cannot add drive"))
-                        else:
-                            new_folders.append(folder)
-                    # If invalid folders, show error with list and give option
-                    # to cancel new link operation
-                    continue_op = wx.ID_OK
-                    if len(invalid_folders) != 0:
-                        continue_op = self.invalid_folders(choose_dir_dialog,
-                                                           invalid_folders)
-                    if len(new_folders) != 0 and continue_op == wx.ID_OK:
-                        return [Folder(path, None) for path in new_folders]
-        return prev_selection + curr_selection
+                    new_folders.append(folder)
+            # If invalid folders, show error with list and give option
+            # to cancel new link operation
+            if len(invalid_folders) != 0 and \
+                        self.invalid_folders(self, invalid_folders) != wx.ID_OK:
+                pass # invalid folders selected and user cancelled
+            elif len(new_folders) != 0:
+                returned_folders = [Folder(path) for path in new_folders]
+        choose_dir_dialog.Destroy()
+        return returned_folders
 
     def invalid_folders(self, parent, invalid_folders):
         message = "One or more folders cannot be linked: "
         for folder, error in invalid_folders:
             message += "\n%s (%s)" % (folder, error)
-        bad_folder_diag = wx.MessageDialog(parent, message =
-                        message, caption="Error: Invalid folders",
-                        style=wx.OK|wx.CANCEL|wx.CENTRE)
-        choice = bad_folder_diag.ShowModal()
-        bad_folder_diag.Destroy()
-        return choice
+        return message_dialog_answer(parent, message, "Error: Invalid folders",
+                                     wx.OK|wx.CANCEL|wx.CENTRE)
 
-    def no_folders(self, parent):
-        none_dialog = wx.MessageDialog(parent, "No folders selected.",
-                                        "No selection", wx.OK|wx.CENTRE)
-        none_dialog.ShowModal()
-        none_dialog.Destroy()
-
-
-def symlink(old_path, new_path):
+def symlink(folder, new_loc):
+    new_path = new_loc + folder.name
     print("Moving...")
-    shutil.move(old_path, new_path)
+    move(folder.link_path, new_path) # moves actual files
     print("Moved.")
+    if folder.link_path != folder.original_path:
+        print("Removing old symlink...")
+        rmdir(folder.original_path) # removes old symlink
+        print("Old symlink removed.")
     print("Symlinking...")
-    KERNELDLL.CreateSymbolicLinkW(old_path, new_path, 1)
+    KERNELDLL.CreateSymbolicLinkW(folder.original_path, new_path, 1)
     print("Symlinked.")
+    folder.set_link_loc(new_loc)
 
-def move_symlink(original_path, old_link_path, new_link_path):
-    print("Moving...")
-    shutil.move(old_link_path, new_link_path)
-    print("Moved.")
-    print("Removing old link...")
-    os.rmdir(original_path)
-    print("Old link removed.")
-    print("Symlinking...")
-    KERNELDLL.CreateSymbolicLinkW(original_path, new_link_path, 1)
-    print("Symlinked.")
-
-def YesNoDialog(parent, question, caption = 'Yes or no?'):
-    dlg = wx.MessageDialog(parent, question, caption, 
-                           wx.YES|wx.NO|wx.ICON_QUESTION)
+def message_dialog_answer(parent, message, title, styles):
+    dlg = wx.MessageDialog(parent, message, title, styles)
     answer = dlg.ShowModal()
     dlg.Destroy()
     return answer
 
+def yes_no_dialog(parent, question, caption = 'Yes or no?'):
+    return message_dialog_answer(parent, question, caption, 
+                                 wx.YES|wx.NO|wx.ICON_QUESTION)
+
 def MakeBackupFile(file_name, error_message):
     try:
-        shutil.copy(file_name, '~' + file_name)
+        copy(file_name, '~' + file_name)
     except:
         print(error_message)
 
-class ColPanel(wx.Panel):
-    def __init__(self, parent, heading_txt, olv, button_tup):
-        wx.Panel.__init__(self, parent, -1)
-        heading_text = wx.StaticText(self, -1, heading_txt)
-        olv.Reparent(self)
-        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        for button in button_tup:
-            button_sizer.Add(button, flag=wx.ALL, border=5)
-            button.Reparent(self)
-
-        list_sizer = wx.BoxSizer(wx.VERTICAL)
-        list_sizer.Add(heading_text, flag=wx.ALIGN_CENTER)
-        list_sizer.Add(olv, flag=wx.ALIGN_CENTER|wx.EXPAND, proportion=1)
-        list_sizer.Add(button_sizer, flag=wx.ALIGN_CENTER)
-        self.SetSizer(list_sizer)
-        self.Layout()
+def make_column_panel(parent, heading_txt, olv, button_tup):
+    panel = wx.Panel(parent, -1)
+    heading_text = wx.StaticText(panel, -1, heading_txt)
+    olv.Reparent(panel)
+    button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+    for button in button_tup:
+        button_sizer.Add(button, flag=wx.ALL, border=5)
+        button.Reparent(panel)
+    list_sizer = wx.BoxSizer(wx.VERTICAL)
+    list_sizer.Add(heading_text, flag=wx.ALIGN_CENTER)
+    list_sizer.Add(olv, flag=wx.ALIGN_CENTER|wx.EXPAND, proportion=1)
+    list_sizer.Add(button_sizer, flag=wx.ALIGN_CENTER)
+    panel.SetSizer(list_sizer)
+    panel.Layout()
+    return panel
 
 def make_olv(parent, col_titles, init_objects):
     olv = ObjectListView(parent, style=wx.LC_REPORT|wx.BORDER_SUNKEN)
@@ -301,22 +275,37 @@ def make_olv(parent, col_titles, init_objects):
     olv.AutoSizeColumns()
     return olv
 
+def make_proper_loc(improper_loc):
+    if improper_loc[-1] != u'\\':
+        return improper_loc + u'\\'
+    return improper_loc
+
 class Folder():
-    def __init__(self, original_path, link_loc, link_state=-1, date=None):
-        # link_state: -1 for new folder
-        #              0 for previously
-        #              1 for currently
+    def __init__(self, original_path, link_loc=None, link_state=NEW_STATE, date=None):
         self.original_path = original_path
         self.original_loc, self.name = original_path.rsplit('\\', 1)
-        self.link_loc = link_loc
+        self.original_loc = make_proper_loc(self.original_loc)
         self.link_state = link_state
-        if date == None:
-            self.date = str(datetime.now())[:-7]
+        if link_loc is None:
+            self.link_loc = self.original_loc
+        else:
+            self.link_loc = link_loc
+        if date is not None:
+            self.date = self.set_date()
         else:
             self.date = date
+
     @property
-    def link_path():
-        return link_loc + '\\' + self.name
+    def link_path(self):
+        return self.link_loc + self.name
+
+    def set_link_loc(self, link_loc):
+        self.link_loc = link_loc
+        self.set_date()
+        self.link_state = LISTS['CURR']['STATE']
+
+    def set_date(self):
+        self.date = str(datetime.now())[:-7]
 
 if __name__ == '__main__':
     app = wx.App(redirect=False)

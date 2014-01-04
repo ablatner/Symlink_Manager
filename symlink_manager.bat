@@ -1,3 +1,6 @@
+:: From https://sites.google.com/site/eneerge/scripts/batchgotadmin
+:: and from http://stackoverflow.com/questions/18350441/how-to-run-a-command-as-administrator-mode
+
 @echo off
 
 :: BatchGotAdmin
