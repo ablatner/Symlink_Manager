@@ -1,13 +1,15 @@
 import wx
 from ObjectListView import ObjectListView, ColumnDefn
 from datetime import datetime
-from shutil import move, copy
-from os import rmdir
+import shutil
+import os
 import wx.lib.agw.multidirdialog as MDD
 from ctypes import windll
 import sqlite3
+import stat
 
-KERNELDLL = windll.LoadLibrary("kernel32.dll")
+# KERNEL32DLL = windll.LoadLibrary("kernel32.dll")
+KERNEL32DLL = windll.kernel32
 
 FRAME_TITLE = "Symlink Manager"
 FRAME_SIZE = (1200, 300)
@@ -34,8 +36,7 @@ CURR_SQL_COLUMNS = "(folder text, original_loc text, current_link text, date tex
 CURR_TABLE_DECLARATION = "%s %s" % (CURR_TABLE, CURR_SQL_COLUMNS)
 
 # data files
-PREV_HISTORY_FILE = "prev_history.csv"
-CURR_HISTORY_FILE = "curr_history.csv"
+maindb = "database.db"
 
 LISTS = {
     "PREV": {"HEADING": PREV_HEADING, "COLUMNS": PREV_COLUMNS, "STATE": 0,
@@ -69,7 +70,9 @@ class MainWindow(wx.Frame):
     def create_menu(self):
         menus = (
             ("&File", (
-                    (wx.ID_EXIT, "E&xit", "Close the program", self.on_exit),
+                    (wx.ID_ANY, "&Delete Link Database", "Deletes database of "
+                     "links", self.on_delete),
+                    (wx.ID_EXIT, "E&xit", "Close the program", self.on_exit)
                 )
             ),
             ("&Edit", (
@@ -83,20 +86,20 @@ class MainWindow(wx.Frame):
         )
 
         menu_bar = wx.MenuBar()
-        for (label, menu_list) in menus:
+        for (label, item_list) in menus:
             menu = wx.Menu()
-            for (id, label, help_text, handler) in menu_list:
+            for (id, item, help_text, handler) in item_list:
                 if id is None:
                     menu.AppendSeperator()
                 else:
-                    item = menu.Append(id, label, help_text)
+                    item = menu.Append(id, item, help_text)
                     self.Bind(wx.EVT_MENU, handler, item)
             menu_bar.Append(menu, label)
         self.SetMenuBar(menu_bar)
 
     def init_database(self):
-        MakeBackupFile('database.db', 'Database created.')
-        self.connection = sqlite3.connect('database.db')
+        self.connection = sqlite3.connect(maindb)
+        MakeBackupFile(maindb, 'Could not backup database.')
         self.cursor = self.connection.cursor()
         for val in LISTS.values():
             self.cursor.execute("create table if not exists %s" %
@@ -111,7 +114,9 @@ class MainWindow(wx.Frame):
         match_button.Bind(wx.EVT_BUTTON, self.on_match, match_button)
         prev_button = wx.Button(self.panel, id=-1, label = "Prev")
         #self.panel.Bind(wx.EVT_BUTTON, self.OnPrev, prev_button)
-        LISTS['PREV']['BUTTONS'] = (new_button, match_button, prev_button)
+        add_button = wx.Button(self.panel, id=-1, label = "Add existing")
+        #self.panel.Bind(wx.EVT_BUTTON, self.OnAdd, add_button)
+        LISTS['PREV']['BUTTONS'] = (new_button, match_button, prev_button, add_button)
 
         unlink_button = wx.Button(self.panel, id=-1, label = "Unlink")
         self.panel.Bind(wx.EVT_BUTTON, self.on_unlink, unlink_button)
@@ -121,7 +126,7 @@ class MainWindow(wx.Frame):
         for val in LISTS.values():
             self.cursor.execute("select * from %s" % val['TABLE'])
             val["OBJECTLISTVIEW"] = make_olv(self.panel, val['COLUMNS'],
-                [Folder(row[1]+row[0], row[2], val['STATE'], row[3]) for row 
+                [Folder(os.path.join(row[1],row[0]), row[2], val['STATE'], row[3]) for row 
                  in self.cursor.fetchall()])
             val['PANEL'] = make_column_panel(self.panel, val['HEADING'],
                                 val["OBJECTLISTVIEW"], val['BUTTONS'])
@@ -130,6 +135,12 @@ class MainWindow(wx.Frame):
         col_sizer.Add((20,0))
         self.panel.SetSizer(col_sizer)
         self.panel.Fit()
+
+    def on_delete(self, event):
+        if yes_no_dialog(self, "Clear history of links and delete database "
+            "file?") == wx.ID_YES:
+            self.connection.close()
+            os.remove("database.db")
 
     def on_exit(self, event):
         self.connection.commit()
@@ -144,11 +155,10 @@ class MainWindow(wx.Frame):
 
     def link(self, folder, new_loc):
         old_state = folder.link_state
-        if symlink(folder, new_loc) != 0:
+        if self.symlink(folder, new_loc) != 0:
             print("Link for %s failed." % folder.original_path)
             return
         if old_state == LISTS['CURR']['STATE']:
-            print folder.link_path
             LISTS['CURR']['OBJECTLISTVIEW'].RefreshObject(folder)
             self.cursor.execute("update current set current_link='%s' "
                 "where folder='%s' and original_loc='%s'" %
@@ -185,11 +195,22 @@ class MainWindow(wx.Frame):
             # new location chosen
             new_loc = make_proper_loc(new_dir_dialog.GetPath())
             for folder in selection:
-                print "matched ", new_loc+folder.original_loc.split('\\', 1)[1]
                 self.link(folder, new_loc + folder.original_loc.split('\\', 1)[1])
                     
     def on_unlink(self, event):
-        pass
+        selection = self.get_olv_selection()
+        question = "Unlink the following folders?"
+        for folder in selection:
+            question += "\n%s" % folder.original_path
+        if yes_no_dialog(self.panel, question) == wx.ID_YES:
+            for folder in selection:
+                self.unlink(self.panel, folder)
+
+    def get_olv_selection(self):
+        selection = []
+        for olv in [val["OBJECTLISTVIEW"] for val in LISTS.values()]:
+            selection += olv.GetSelectedObjects()
+        return selection
 
     def get_selection(self, cmd):
         """
@@ -197,17 +218,14 @@ class MainWindow(wx.Frame):
 
         Return value: List of Folder objects, or None
         """
-        prev_selection = LISTS["PREV"]["OBJECTLISTVIEW"].GetSelectedObjects()
-        curr_selection = LISTS["CURR"]["OBJECTLISTVIEW"].GetSelectedObjects()
-        if prev_selection or curr_selection:
-            return prev_selection + curr_selection
+        selection = self.get_olv_selection()
+        if selection:
+            return selection
         # no folder selected
         choose_dir_dialog = MDD.MultiDirDialog(self, title="Select folders to %s" % cmd)
         # Clicked ok after selecting folders
-        returned_folders = None
         if choose_dir_dialog.ShowModal() == wx.ID_OK:
             chosen_new_folders = choose_dir_dialog.GetPaths()
-            print "chosen: ", chosen_new_folders
             # No folders selected
             if len(chosen_new_folders) == 0:
                 message_dialog_answer(self, "No folders selected.",
@@ -218,6 +236,8 @@ class MainWindow(wx.Frame):
             for folder in chosen_new_folders:
                 if folder[-1] in (":", "\\"):
                     invalid_folders.append((folder, "Cannot add drive"))
+                elif IsSymlink(folder):
+                    invalid_folders.append((folder, "Cannot add symlink"))
                 else:
                     new_folders.append(folder)
             # If invalid folders, show error with list and give option
@@ -226,9 +246,9 @@ class MainWindow(wx.Frame):
                         self.invalid_folders(self, invalid_folders) != wx.ID_OK:
                 pass # invalid folders selected and user cancelled
             elif len(new_folders) != 0:
-                returned_folders = [Folder(path) for path in new_folders]
+                selection = [Folder(path) for path in new_folders]
         choose_dir_dialog.Destroy()
-        return returned_folders
+        return selection
 
     def invalid_folders(self, parent, invalid_folders):
         message = "One or more folders cannot be linked: "
@@ -237,39 +257,94 @@ class MainWindow(wx.Frame):
         return message_dialog_answer(parent, message, "Error: Invalid folders",
                                      wx.OK|wx.CANCEL|wx.CENTRE)
 
-def symlink(folder, new_loc):
-    new_path = new_loc + folder.name
-    print("Moving...")
-    try:
-        move(folder.link_path, new_path) # moves actual files
-        print("Moved.")
-    except:
-        print("Move failed of file %s" % folder.original_path)
-        return -1
-    if folder.link_path != folder.original_path:
-        print("Removing old symlink...")
+    def symlink(self, folder, new_loc):
+        new_path = new_loc + folder.name
+        print("Setting permissions...")
+        for root, dirs, files in os.walk(folder.link_path, topdown=False):
+            for dir in dirs:
+                dir = os.path.join(root, dir)
+                try:
+                    os.chmod(dir, get_perm(dir) | stat.S_IWUSR)
+                except:
+                    print("Could not set permissions on folder: %s" % dir)
+                    return -1
+            for file in files:
+                file = os.path.join(root, file)
+                try:
+                    os.chmod(file, get_perm(file) | stat.S_IWUSR)
+                except:
+                    print("Could not set permissions on file: %s" % file)
+                    return -1
+        print("Permissions set.")
+
+        print("Moving...")
         try:
-            rmdir(folder.original_path) # removes old symlink
-            print("Old symlink removed.")
+            shutil.move(folder.link_path, new_path) # moves actual files
+            print("Moved.")
         except:
-            print("Could not remove old symlink at: %s" % folder.original_path)
-            move(new_path, folder.link_path)
+            print("Move failed of file %s" % folder.original_path)
             return -1
-    print("Symlinking...")
-    try:
-        KERNELDLL.CreateSymbolicLinkW(folder.original_path, new_path, 1)
-        print("Symlinked.")
-    except:
-        print("Could not symlink from %s to %s" % (folder.original_path, new_path))
-        move(new_path, folder.link_path)
-        if folder.link_path != folder.original_path:
+
+        if folder.link_state == LISTS['CURR']['STATE']:
+            print("Removing old symlink...")
             try:
-                KERNELDLL.CreateSymbolicLinkW(folder.original_path, folder.link_path, 1)
+                os.rmdir(folder.original_path) # removes old symlink
+                print("Old symlink removed.")
             except:
-                print("Could not recreate old symlink from %s to %s" % (folder.original_path, folder.link_path))
-        return -1
-    folder.set_link_loc(new_loc)
-    return 0
+                print("Could not remove old symlink at: %s" % folder.original_path)
+                try:
+                    shutil.move(new_path, folder.link_path)
+                except:
+                    print("Could not move folder back to link path: %s" % folder.link_path)
+                return -1
+        
+        print("Symlinking...")
+        try:
+            KERNEL32DLL.CreateSymbolicLinkW(folder.original_path, new_path, 1)
+            print("Symlinked.")
+        except:
+            print("Could not symlink from %s to %s" % (folder.original_path, new_path))
+            try:
+                shutil.move(new_path, folder.link_path)
+            except:
+                print("Could not move folder back to link path: %s" % folder.link_path)
+            if folder.link_state == LISTS['CURR']['STATE']:
+                try:
+                    KERNEL32DLL.CreateSymbolicLinkW(folder.original_path, folder.link_path, 1)
+                except:
+                    print("Could not recreate old symlink from %s to %s" % (folder.original_path, folder.link_path))
+            return -1
+        folder.set_link_loc(new_loc)
+        return 0
+
+    def unlink(self, parent, folder):
+        if folder.link_state != LISTS['CURR']['STATE']:
+            print("Folder %s not currently linked. Cannot unlink." % folder.original_path)
+            return -1
+
+        if IsSymlink(folder.original_path):
+            print("Removing old symlink...")
+            try:
+                os.rmdir(folder.original_path) # removes old symlink
+                print("Old symlink removed.")
+            except:
+                print("Could not remove old symlink at: %s" % folder.original_path)
+                return -1
+        else:
+            if yes_no_dialog(parent, "Move target back to %s?" % folder.original_path,
+                             "Symlink not present at original location.") == wx.ID_NO:
+                return -1
+
+        print("Moving to original location...")
+        try:
+            shutil.move(folder.link_path, folder.original_path) # moves actual folders
+            print("Moved.")
+        except:
+            print("Move failed of folder %s" % folder.original_path)
+            return -1
+
+def get_perm(fname):
+    return stat.S_IMODE(os.lstat(fname)[stat.ST_MODE])
 
 def message_dialog_answer(parent, message, title, styles):
     dlg = wx.MessageDialog(parent, message, title, styles)
@@ -279,11 +354,20 @@ def message_dialog_answer(parent, message, title, styles):
 
 def yes_no_dialog(parent, question, caption = 'Yes or no?'):
     return message_dialog_answer(parent, question, caption, 
-                                 wx.YES|wx.NO|wx.ICON_QUESTION)
+                                 wx.YES_NO|wx.ICON_QUESTION)
+
+def IsSymlink(path):
+    # no real idea of how this works. yay!
+    FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+    if os.path.isdir(path) and \
+        (KERNEL32DLL.GetFileAttributesW(path) & FILE_ATTRIBUTE_REPARSE_POINT):
+        return True
+    else:
+        return False
 
 def MakeBackupFile(file_name, error_message):
     try:
-        copy(file_name, '~' + file_name)
+        shutil.copy(file_name, '~' + file_name)
     except:
         print(error_message)
 
@@ -317,9 +401,6 @@ def make_proper_loc(improper_loc):
 
 class Folder():
     def __init__(self, original_path, link_loc=None, link_state=NEW_STATE, date=None):
-        print original_path
-        print link_loc
-        print link_state
         self.original_path = original_path
         self.original_loc, self.name = original_path.rsplit('\\', 1)
         self.original_loc = make_proper_loc(self.original_loc)
@@ -332,7 +413,6 @@ class Folder():
             self.date = self.set_date()
         else:
             self.date = date
-        print self.date
 
     @property
     def link_path(self):
