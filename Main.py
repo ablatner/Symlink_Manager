@@ -158,28 +158,6 @@ class MainWindow(wx.Frame):
         dialog.ShowModal()
         dialog.Destroy()
 
-    def link(self, folder, new_loc):
-        old_state = folder.link_state
-        if self.symlink(folder, new_loc) != 0:
-            print("Link for %s failed." % folder.original_path)
-            return
-        if old_state == LISTS['CURR']['STATE']:
-            LISTS['CURR']['OBJECTLISTVIEW'].RefreshObject(folder)
-            self.cursor.execute("update current set current_link='%s' "
-                "where folder='%s' and original_loc='%s'" %
-                (folder.link_loc, folder.name, folder.original_path))
-        else:
-            if old_state == LISTS['PREV']['STATE']:
-                LISTS['PREV']['OBJECTLISTVIEW'].RemoveObject(folder)
-                self.cursor.execute("delete from previous where "
-                    "folder='%s' and original_loc='%s'" %
-                    (folder.name, folder.original_loc))
-            LISTS['CURR']['OBJECTLISTVIEW'].AddObject(folder)
-            self.cursor.execute("insert into current values "
-                "('%s','%s','%s','%s')" % (folder.name,
-                folder.original_loc, folder.link_loc, folder.date))
-        self.connection.commit()
-
     def on_new(self, event):
         selection = self.get_selection("move") # list of folder objects
         if not selection: # nothing selected; nothing to do
@@ -230,12 +208,6 @@ class MainWindow(wx.Frame):
                         folder.original_loc, folder.link_loc, folder.date))
             self.connection.commit()
 
-    def get_olv_selection(self):
-        selection = []
-        for olv in [val["OBJECTLISTVIEW"] for val in LISTS.values()]:
-            selection += olv.GetSelectedObjects()
-        return selection
-
     def get_selection(self, cmd):
         """
         Return selected folders or ask user to select with DirDialog
@@ -274,12 +246,40 @@ class MainWindow(wx.Frame):
         choose_dir_dialog.Destroy()
         return selection
 
+    def get_olv_selection(self):
+        selection = []
+        for olv in [val["OBJECTLISTVIEW"] for val in LISTS.values()]:
+            selection += olv.GetSelectedObjects()
+        return selection
+
     def invalid_folders(self, parent, invalid_folders):
         message = "One or more folders cannot be linked: "
         for folder, error in invalid_folders:
             message += "\n%s (%s)" % (folder, error)
         return message_dialog_answer(parent, message, "Error: Invalid folders",
                                      wx.OK|wx.CANCEL|wx.CENTRE)
+
+    def link(self, folder, new_loc):
+        old_state = folder.link_state
+        if self.symlink(folder, new_loc) != 0:
+            print("Link for %s failed." % folder.original_path)
+            return
+        if old_state == LISTS['CURR']['STATE']:
+            LISTS['CURR']['OBJECTLISTVIEW'].RefreshObject(folder)
+            self.cursor.execute("update current set current_link='%s' "
+                "where folder='%s' and original_loc='%s'" %
+                (folder.link_loc, folder.name, folder.original_path))
+        else:
+            if old_state == LISTS['PREV']['STATE']:
+                LISTS['PREV']['OBJECTLISTVIEW'].RemoveObject(folder)
+                self.cursor.execute("delete from previous where "
+                    "folder='%s' and original_loc='%s'" %
+                    (folder.name, folder.original_loc))
+            LISTS['CURR']['OBJECTLISTVIEW'].AddObject(folder)
+            self.cursor.execute("insert into current values "
+                "('%s','%s','%s','%s')" % (folder.name,
+                folder.original_loc, folder.link_loc, folder.date))
+        self.connection.commit()
 
     def symlink(self, folder, new_loc):
         new_path = new_loc + folder.name
@@ -378,6 +378,15 @@ class MainWindow(wx.Frame):
 def get_perm(fname):
     return stat.S_IMODE(os.lstat(fname)[stat.ST_MODE])
 
+def IsSymlink(path):
+    # no real idea of how this works. yay!
+    FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+    if os.path.isdir(path) and \
+        (KERNEL32DLL.GetFileAttributesW(path) & FILE_ATTRIBUTE_REPARSE_POINT):
+        return True
+    else:
+        return False
+
 def message_dialog_answer(parent, message, title, styles):
     dlg = wx.MessageDialog(parent, message, title, styles)
     answer = dlg.ShowModal()
@@ -387,15 +396,6 @@ def message_dialog_answer(parent, message, title, styles):
 def yes_no_dialog(parent, question, caption = 'Yes or no?'):
     return message_dialog_answer(parent, question, caption, 
                                  wx.YES_NO|wx.ICON_QUESTION)
-
-def IsSymlink(path):
-    # no real idea of how this works. yay!
-    FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
-    if os.path.isdir(path) and \
-        (KERNEL32DLL.GetFileAttributesW(path) & FILE_ATTRIBUTE_REPARSE_POINT):
-        return True
-    else:
-        return False
 
 def MakeBackupFile(file_name, error_message):
     try:
